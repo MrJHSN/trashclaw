@@ -212,6 +212,30 @@ def _track_tool(tool_name: str):
 CWD = os.getcwd()
 _INTERRUPTED = False
 
+# ── Backend Detection ──
+BACKEND_TYPE = None  # Will be set to: llama-server, ollama, lmstudio, or openai
+
+def detect_backend() -> str:
+    """Detect the type of LLM server running at LLAMA_URL."""
+    global BACKEND_TYPE
+    if BACKEND_TYPE is not None:
+        return BACKEND_TYPE
+    
+    try:
+        req = urllib.request.Request(LLAMA_URL)
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            server_header = resp.headers.get("server", "").lower()
+            if "ollama" in server_header:
+                BACKEND_TYPE = "ollama"
+            elif "lmstudio" in server_header:
+                BACKEND_TYPE = "lmstudio"
+            else:
+                BACKEND_TYPE = "openai"
+    except Exception:
+        BACKEND_TYPE = "openai"
+    
+    return BACKEND_TYPE
+
 # ── Tool Definitions ──
 
 TOOLS = [
@@ -860,7 +884,9 @@ def tool_fetch_url(url: str) -> str:
     except urllib.error.HTTPError as e:
         return f"HTTP Error fetching {url}: {e.code} {e.reason}"
     except urllib.error.URLError as e:
-        return f"URL Error fetching {url}: {e.reason}"
+        if BACKEND_TYPE == "ollama" and hasattr(e, 'reason') and isinstance(e.reason, urllib.error.HTTPError) and e.reason.code == 404:
+            return "Ollama server not found or not running. Please start Ollama first."
+        return f"URL Error fetching {url}: {e.reason if hasattr(e, 'reason') else str(e)}"
     except Exception as e:
         return f"Error fetching {url}: {str(e)}"
 
@@ -1251,7 +1277,13 @@ def llm_request_with_retry(messages: List[Dict], tools: List[Dict] = None) -> Di
 
 
 def llm_request(messages: List[Dict], tools: List[Dict] = None) -> Dict:
-    """Send request to llama-server and return the full response while streaming text."""
+    """Send request to the appropriate endpoint based on detected backend."""
+    detect_backend()  # Ensure backend is detected
+    
+    endpoint = "/v1/chat/completions"
+    if BACKEND_TYPE == "ollama":
+        endpoint = "/api/chat"
+    
     payload = {
         "messages": messages,
         "temperature": 0.3,
@@ -1263,8 +1295,9 @@ def llm_request(messages: List[Dict], tools: List[Dict] = None) -> Dict:
         payload["tool_choice"] = "auto"
 
     data = json.dumps(payload).encode("utf-8")
+    url = f"{LLAMA_URL}{endpoint}"
     req = urllib.request.Request(
-        f"{LLAMA_URL}/v1/chat/completions",
+        url,
         data=data,
         headers={"Content-Type": "application/json"},
     )
@@ -1316,6 +1349,8 @@ def llm_request(messages: List[Dict], tools: List[Dict] = None) -> Dict:
                     pass
         print() # Newline after streaming completes
     except urllib.error.URLError as e:
+        if BACKEND_TYPE == "ollama" and hasattr(e, 'reason') and isinstance(e.reason, urllib.error.HTTPError) and e.reason.code == 404:
+            return "Ollama server not found or not running. Please start Ollama first."
         return {"error": f"Cannot reach llama-server: {e}"}
     except Exception as e:
         return {"error": f"LLM request failed: {e}"}
